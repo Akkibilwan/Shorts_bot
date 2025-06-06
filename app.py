@@ -226,12 +226,12 @@ def poll_stats_background():
     Background thread: once discovery+initial fetch is done, this runs every hour
     to append new (timestamp, viewCount, likeCount, commentCount) per video.
     """
-    global error_message
+
 
     # First, wait until we have run discovery (cached)
     while True:
         # If discovery had an error, bail
-        if error_message:
+        if st.session_state.error_message:
             return
 
         # If the cached discovery returned no_shorts_flag=True, also bail
@@ -275,7 +275,7 @@ def poll_stats_background():
                     int(stats.get("likeCount", 0)),
                     int(stats.get("commentCount", 0)),
                 )
-                with data_lock:
+                with st.session_state.data_lock:
                     st.session_state.shorts_data[vid].append(row)
 
         # Write to Google Sheet
