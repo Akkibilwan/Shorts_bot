@@ -13,7 +13,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 def scheduler_loop():
     """
-    Runs in a daemon thread. Sleeps until the next top-of-hour boundary, then calls
+    Runs in a daemon thread. Sleeps until the next top‐of‐hour boundary, then calls
     run_once_and_append(). After each run, it waits for the next hour.
     """
     # Give the UI a moment to finish loading
@@ -358,11 +358,17 @@ def run_once_and_append():
         if vid not in tracked_ids:
             tracked_ids.add(vid)
             video_to_channel_past[vid] = r[1]
-            # Parse published_at (column index 2)
+            # Parse published_at (column index 2), which was previously in IST dd/mm/yyyy hh:mm:ss
             try:
-                video_to_published_past[vid] = datetime.fromisoformat(r[2].replace("Z", "+00:00")).astimezone(timezone.utc)
+                # Convert user-provided "dd/mm/yyyy hh:mm:ss" → datetime in IST, then back to UTC for tracking
+                dt_ist = datetime.strptime(r[2], "%d/%m/%Y %H:%M:%S")
+                # Attach IST offset
+                ist_tz = timezone(timedelta(hours=5, minutes=30))
+                dt_ist = dt_ist.replace(tzinfo=ist_tz)
+                # Convert to UTC
+                video_to_published_past[vid] = dt_ist.astimezone(timezone.utc)
             except:
-                # If it fails, skip storing published_at for that vid
+                # If parsing fails, skip storing published_at for that vid
                 pass
 
     st.write(f"➡️  Currently tracking {len(tracked_ids)} unique Short(s) from previous runs.")
@@ -397,12 +403,11 @@ def run_once_and_append():
         st.error("❌ Failed to fetch statistics for any tracked video.")
         return
 
-    # --- ⚠️ IMPORTANT CHANGE: Compute timestamp in IST, formatted dd/mm/yyyy hh:mm:ss ⚠️ ---
-    #
-    # We want the sheet’s “timestamp” column to look like “06/06/2025 16:27:00” (IST).
-    # So:
+    # --- ⚠️ IMPORTANT CHANGE: Compute published_at in IST and timestamp in IST, both formatted dd/mm/yyyy hh:mm:ss ⚠️ ---
     ist_tz = timezone(timedelta(hours=5, minutes=30))
-    now_ist = datetime.now(ist_tz)
+
+    # Timestamp for “now” in IST
+    now_ist = datetime.now(timezone.utc).astimezone(ist_tz)
     timestamp_str = now_ist.strftime("%d/%m/%Y %H:%M:%S")
 
     # --- Step 4: Build a “new row” for each video_id with the current stats & metrics ---
@@ -415,8 +420,11 @@ def run_once_and_append():
             st.warning(f"⚠️ Skipping {vid} (missing published_at info).")
             continue
 
-        published_dt = video_to_published_past[vid]
-        published_iso = published_dt.strftime("%Y-%m-%dT%H:%M:%SZ")  # published_at remains in UTC ISO for clarity
+        # Convert published_at (UTC) → IST → formatted string
+        published_dt_utc = video_to_published_past[vid]
+        published_dt_ist = published_dt_utc.astimezone(ist_tz)
+        published_str = published_dt_ist.strftime("%d/%m/%Y %H:%M:%S")
+
         channel_title = video_to_channel_past.get(vid, "N/A")
 
         viewCount = stats[vid]["viewCount"]
@@ -424,15 +432,15 @@ def run_once_and_append():
         commentCount = stats[vid]["commentCount"]
 
         # Hours since published (floor at 1 second = 1/3600 hour)
-        delta_hours = max((datetime.now(timezone.utc) - published_dt).total_seconds() / 3600.0, 1/3600.0)
+        delta_hours = max((datetime.now(timezone.utc) - published_dt_utc).total_seconds() / 3600.0, 1/3600.0)
         vph = viewCount / delta_hours
         engagement_rate = ((likeCount + commentCount) / viewCount) if viewCount > 0 else 0.0
 
         row = [
             vid,
             channel_title,
-            published_iso,
-            timestamp_str,      # ← IST timestamp in dd/mm/yyyy hh:mm:ss
+            published_str,    # “dd/mm/yyyy hh:mm:ss” in IST
+            timestamp_str,    # “dd/mm/yyyy hh:mm:ss” in IST
             str(viewCount),
             str(likeCount),
             str(commentCount),
@@ -490,7 +498,7 @@ st.write(
        - It reads all tracked Shorts from the Google Sheet.
        - It discovers any *new* Shorts published *today in IST* and starts tracking them.
        - It fetches the latest stats for *all* tracked Shorts (old + new), computes VPH & engagement rate, and appends a row per video with the new timestamp.
-       - **The timestamp is now in IST and in `dd/mm/yyyy hh:mm:ss` format.**
+       - **Both “published_at” and “timestamp” are now in IST and in `dd/mm/yyyy hh:mm:ss` format.**
     2. You can also click the button below to force a “Run Now” immediately.
     3. The sheet accumulates one row per (video_id, timestamp), letting you watch metrics evolve over hours/days.
     """
