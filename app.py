@@ -282,7 +282,7 @@ def fetch_statistics(video_ids):
 
 def run_once_and_append():
     # Kick off the cron thread (only once)
-    start_cron_thread()
+    # start_cron_thread()
     
     """
     1) Read every row from the sheet → discover which video_ids we have already been tracking.
