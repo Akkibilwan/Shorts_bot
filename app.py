@@ -283,8 +283,6 @@ def fetch_statistics(video_ids):
 # ----------------------- Core “Run Now” Function ----------------------------
 
 def run_once_and_append():
-    # Kick off the cron thread (only once)
-    start_cron_thread()
     
     """
     1) Read every row from the sheet → discover which video_ids we have already been tracking.
@@ -469,6 +467,9 @@ st.write(
     5. Over time (hour by hour), the sheet accumulates one row per (video_id, timestamp), letting you see how each Short’s metrics evolve.
     """
 )
+
+# Kick off the cron thread (only once)
+start_cron_thread()
 
 if st.button("▶️ Run Now: Discover & Append to Sheet"):
     run_once_and_append()
