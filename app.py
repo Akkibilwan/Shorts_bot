@@ -125,7 +125,7 @@ def iso8601_to_seconds(duration_str: str) -> int:
 def get_midnight_ist_utc() -> datetime:
     """
     Return a timezone-aware UTC datetime corresponding to 00:00:00 IST today.
-    IST is UTC+5:30. 
+    IST is UTC+5:30.
     """
     now_utc = datetime.now(timezone.utc)
     ist_tz = timezone(timedelta(hours=5, minutes=30))
@@ -145,7 +145,7 @@ def get_midnight_ist_utc() -> datetime:
 def is_within_today(published_at_str: str) -> bool:
     """
     Given a publishedAt timestamp (RFC3339: "YYYY-MM-DDThh:mm:ssZ"),
-    return True iff that moment (in UTC) falls between [00:00 IST today, 24h later).
+    return True if that moment (in UTC) falls between [00:00 IST today, 24h later).
     """
     try:
         pub_dt = datetime.fromisoformat(published_at_str.replace("Z", "+00:00")).astimezone(timezone.utc)
@@ -162,7 +162,6 @@ def retry_youtube_call(func_or_request, *args, **kwargs):
     call it with (*args, **kwargs).execute(). On HttpError, wait 2s and retry once.
     Returns the parsed JSON on success, or None on two failures.
     """
-    # Case A: if it has .execute() but is not callable, assume it's a pre-built HttpRequest
     if hasattr(func_or_request, "execute") and not callable(func_or_request):
         request = func_or_request
         try:
@@ -175,7 +174,6 @@ def retry_youtube_call(func_or_request, *args, **kwargs):
             except HttpError as e2:
                 st.error(f"❌ YouTube API error (second attempt): {e2}")
                 return None
-    # Case B: if it's callable (like youtube.videos().list), call it
     else:
         try:
             return func_or_request(*args, **kwargs).execute()
@@ -351,6 +349,9 @@ def run_once_and_append():
     tracked_ids = set()
     video_to_channel_past = {}
     video_to_published_past = {}
+
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
+
     for r in rows:
         if len(r) < 4:
             continue
@@ -358,17 +359,21 @@ def run_once_and_append():
         if vid not in tracked_ids:
             tracked_ids.add(vid)
             video_to_channel_past[vid] = r[1]
-            # Parse published_at (column index 2), which was previously in IST dd/mm/yyyy hh:mm:ss
+
+            # Attempt to parse “published_at” in either ISO‐UTC or IST dd/mm/yyyy format
+            pub_str = r[2]
             try:
-                # Convert user-provided "dd/mm/yyyy hh:mm:ss" → datetime in IST, then back to UTC for tracking
-                dt_ist = datetime.strptime(r[2], "%d/%m/%Y %H:%M:%S")
-                # Attach IST offset
-                ist_tz = timezone(timedelta(hours=5, minutes=30))
-                dt_ist = dt_ist.replace(tzinfo=ist_tz)
-                # Convert to UTC
-                video_to_published_past[vid] = dt_ist.astimezone(timezone.utc)
-            except:
-                # If parsing fails, skip storing published_at for that vid
+                if "T" in pub_str and pub_str.endswith("Z"):
+                    # ISO‐8601 UTC string → parse to UTC
+                    dt_utc = datetime.fromisoformat(pub_str.replace("Z", "+00:00"))
+                    video_to_published_past[vid] = dt_utc.astimezone(timezone.utc)
+                else:
+                    # “dd/mm/yyyy hh:mm:ss” in IST → parse → convert to UTC
+                    dt_ist = datetime.strptime(pub_str, "%d/%m/%Y %H:%M:%S")
+                    dt_ist = dt_ist.replace(tzinfo=ist_tz)
+                    video_to_published_past[vid] = dt_ist.astimezone(timezone.utc)
+                # If it fails, we simply do not add to video_to_published_past and skip later
+            except Exception:
                 pass
 
     st.write(f"➡️  Currently tracking {len(tracked_ids)} unique Short(s) from previous runs.")
@@ -403,15 +408,12 @@ def run_once_and_append():
         st.error("❌ Failed to fetch statistics for any tracked video.")
         return
 
-    # --- ⚠️ IMPORTANT CHANGE: Compute published_at in IST and timestamp in IST, both formatted dd/mm/yyyy hh:mm:ss ⚠️ ---
-    ist_tz = timezone(timedelta(hours=5, minutes=30))
-
-    # Timestamp for “now” in IST
+    # --- Step 4: Build a “new row” for each video_id with the current stats & metrics ---
+    new_rows = []
+    # Compute “now” in IST, dd/mm/yyyy hh:mm:ss
     now_ist = datetime.now(timezone.utc).astimezone(ist_tz)
     timestamp_str = now_ist.strftime("%d/%m/%Y %H:%M:%S")
 
-    # --- Step 4: Build a “new row” for each video_id with the current stats & metrics ---
-    new_rows = []
     for vid in all_ids:
         if vid not in stats:
             st.warning(f"⚠️ Skipping {vid} (no stats returned).")
@@ -420,13 +422,12 @@ def run_once_and_append():
             st.warning(f"⚠️ Skipping {vid} (missing published_at info).")
             continue
 
-        # Convert published_at (UTC) → IST → formatted string
+        # Convert stored UTC → IST for “published_at” column
         published_dt_utc = video_to_published_past[vid]
         published_dt_ist = published_dt_utc.astimezone(ist_tz)
         published_str = published_dt_ist.strftime("%d/%m/%Y %H:%M:%S")
 
         channel_title = video_to_channel_past.get(vid, "N/A")
-
         viewCount = stats[vid]["viewCount"]
         likeCount = stats[vid]["likeCount"]
         commentCount = stats[vid]["commentCount"]
@@ -439,8 +440,8 @@ def run_once_and_append():
         row = [
             vid,
             channel_title,
-            published_str,    # “dd/mm/yyyy hh:mm:ss” in IST
-            timestamp_str,    # “dd/mm/yyyy hh:mm:ss” in IST
+            published_str,    # “dd/mm/yyyy hh:mm:ss” in IST for upload time
+            timestamp_str,    # “dd/mm/yyyy hh:mm:ss” in IST for cronjob time
             str(viewCount),
             str(likeCount),
             str(commentCount),
@@ -449,7 +450,7 @@ def run_once_and_append():
         ]
         new_rows.append(row)
 
-    st.write(f"➡️ Built {len(new_rows)} new stat-rows (one per tracked video).")
+    st.write(f"➡️ Built {len(new_rows)} new stat‐rows (one per tracked video).")
 
     # --- Step 5: Filter out any (video_id, timestamp) duplicates that are already in the sheet ---
     existing_pairs = set()
@@ -498,7 +499,7 @@ st.write(
        - It reads all tracked Shorts from the Google Sheet.
        - It discovers any *new* Shorts published *today in IST* and starts tracking them.
        - It fetches the latest stats for *all* tracked Shorts (old + new), computes VPH & engagement rate, and appends a row per video with the new timestamp.
-       - **Both “published_at” and “timestamp” are now in IST and in `dd/mm/yyyy hh:mm:ss` format.**
+       - **Both “Upload Date” and “Cronjob time” are now in IST and in `dd/mm/yyyy hh:mm:ss` format.**
     2. You can also click the button below to force a “Run Now” immediately.
     3. The sheet accumulates one row per (video_id, timestamp), letting you watch metrics evolve over hours/days.
     """
