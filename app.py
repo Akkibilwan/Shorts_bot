@@ -12,7 +12,6 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 def scheduler_loop():
     while True:
-        log_timestamp_job()
         time.sleep(60)
 
 _scheduler_thread = None
