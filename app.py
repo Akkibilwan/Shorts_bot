@@ -14,6 +14,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 def scheduler_loop():
     while True:
         st.info("🔍 Reading the entire sheet to find tracked video IDs…")
+        run_once_and_append()
         time.sleep(60)
 
 _scheduler_thread = None
