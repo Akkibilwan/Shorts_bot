@@ -29,7 +29,7 @@ def scheduler_loop():
         run_once_and_append()
 
         # If you later want an hourly schedule instead of per-minute, comment out
-        # the above four lines and uncomment the block below:
+        # the above three lines and uncomment the block below:
         #
         # now = datetime.now()
         # next_hour = (now.replace(minute=0, second=0, microsecond=0) 
@@ -53,8 +53,10 @@ def start_scheduler_thread():
 
 st.set_page_config(layout="wide")
 
+# 1) YouTube Data API key stored in Streamlit secrets
 API_KEY = st.secrets["youtube"]["api_key"]
 
+# 2) Nine YouTube channel IDs to check for new Shorts
 CHANNEL_IDS = [
     "UC415bOPUcGSamy543abLmRA",
     "UCRzYN32xtBf3Yxsx5BvJWJw",
@@ -67,6 +69,7 @@ CHANNEL_IDS = [
     "UCUUlw3anBIkbW9W44Y-eURw",
 ]
 
+# 3) Your Google Sheet URL (make sure your service account is an Editor)
 GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1OdRsySMe4jcc7xxr01MJFmG94msoYEZWgEflVSj0vRs/edit"
 
 
@@ -74,6 +77,10 @@ GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1OdRsySMe4jcc7xxr01MJ
 
 @st.cache_resource(ttl=3600)
 def get_google_sheet_client():
+    """
+    Authorize via service‐account JSON stored in st.secrets.
+    Returns None + logs an error if authentication fails.
+    """
     try:
         creds_dict = st.secrets["gcp_service_account"]
         scopes = [
@@ -89,6 +96,10 @@ def get_google_sheet_client():
 
 @st.cache_resource(ttl=3600)
 def get_worksheet():
+    """
+    Open the sheet by URL, then fetch the “Sheet1” worksheet.
+    Returns None + logs if anything goes wrong.
+    """
     client = get_google_sheet_client()
     if not client:
         return None
@@ -104,15 +115,26 @@ def get_worksheet():
 # ----------------------- YouTube Helper Functions ----------------------------
 
 def create_youtube_client():
+    """
+    Build a YouTube Data API v3 client using the provided API key.
+    """
     return build("youtube", "v3", developerKey=API_KEY)
 
 def iso8601_to_seconds(duration_str: str) -> int:
+    """
+    Convert an ISO 8601 duration (e.g. "PT2M30S") into total seconds.
+    Returns 0 on parse errors.
+    """
     try:
         return int(parse_duration(duration_str).total_seconds())
     except:
         return 0
 
 def get_midnight_ist_utc() -> datetime:
+    """
+    Return a timezone-aware UTC datetime corresponding to 00:00:00 IST today.
+    IST is UTC+5:30. 
+    """
     now_utc = datetime.now(timezone.utc)
     ist_tz = timezone(timedelta(hours=5, minutes=30))
     now_ist = now_utc.astimezone(ist_tz)
@@ -129,6 +151,10 @@ def get_midnight_ist_utc() -> datetime:
     return midnight_ist.astimezone(timezone.utc)
 
 def is_within_today(published_at_str: str) -> bool:
+    """
+    Given a publishedAt timestamp (RFC3339: "YYYY-MM-DDThh:mm:ssZ"),
+    return True iff that moment (in UTC) falls between [00:00 IST today, 24h later).
+    """
     try:
         pub_dt = datetime.fromisoformat(published_at_str.replace("Z", "+00:00")).astimezone(timezone.utc)
     except:
@@ -138,6 +164,13 @@ def is_within_today(published_at_str: str) -> bool:
     return midnight_utc <= pub_dt < next_midnight_utc
 
 def retry_youtube_call(func_or_request, *args, **kwargs):
+    """
+    Retry pattern for YouTube API calls. If `func_or_request` is a HttpRequest object,
+    just do request.execute(). If it's a callable (like youtube.videos().list),
+    call it with (*args, **kwargs).execute(). On HttpError, wait 2s and retry once.
+    Returns the parsed JSON on success, or None on two failures.
+    """
+    # Case A: if it has .execute() but is not callable, assume it's a pre-built HttpRequest
     if hasattr(func_or_request, "execute") and not callable(func_or_request):
         request = func_or_request
         try:
@@ -150,6 +183,7 @@ def retry_youtube_call(func_or_request, *args, **kwargs):
             except HttpError as e2:
                 st.error(f"❌ YouTube API error (second attempt): {e2}")
                 return None
+    # Case B: if it's callable (like youtube.videos().list), call it
     else:
         try:
             return func_or_request(*args, **kwargs).execute()
@@ -163,6 +197,14 @@ def retry_youtube_call(func_or_request, *args, **kwargs):
                 return None
 
 def discover_shorts():
+    """
+    Discover all Shorts (<= 180 seconds) published “today in IST” across CHANNEL_IDS.
+    Returns:
+      • video_to_channel: { video_id: channel_title }
+      • video_to_published: { video_id: published_datetime_UTC }
+      • logs: [string, …] (for Streamlit to display)
+      • no_shorts_flag: True if *no* Shorts were found (or a fatal YouTube error occurred).
+    """
     youtube = create_youtube_client()
     video_to_channel = {}
     video_to_published = {}
@@ -170,6 +212,7 @@ def discover_shorts():
     all_short_ids = []
 
     for idx, channel_id in enumerate(CHANNEL_IDS, start=1):
+        # 1) Fetch channel snippet + contentDetails to find the uploads playlist
         ch_resp = retry_youtube_call(
             youtube.channels().list,
             part="snippet,contentDetails",
@@ -183,6 +226,7 @@ def discover_shorts():
         uploads_playlist = ch_resp["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
         logs.append(f"🔍 Checking channel {idx}/{len(CHANNEL_IDS)}: '{channel_title}'")
 
+        # 2) Page through the uploads playlist (50 items/page)
         pl_req = youtube.playlistItems().list(
             part="snippet",
             playlistId=uploads_playlist,
@@ -200,6 +244,7 @@ def discover_shorts():
                 if not is_within_today(published_at):
                     continue
 
+                # 3) For each candidate, fetch contentDetails to check duration
                 cd_resp = retry_youtube_call(
                     youtube.videos().list,
                     part="contentDetails,snippet",
@@ -230,6 +275,11 @@ def discover_shorts():
     return video_to_channel, video_to_published, logs, False
 
 def fetch_statistics(video_ids):
+    """
+    Given a list of video IDs, fetch their current statistics
+    (viewCount, likeCount, commentCount) in batches of 50.
+    Returns a dict: { video_id: { "viewCount": int, "likeCount": int, "commentCount": int } }.
+    """
     youtube = create_youtube_client()
     stats_dict = {}
 
@@ -355,10 +405,13 @@ def run_once_and_append():
         st.error("❌ Failed to fetch statistics for any tracked video.")
         return
 
-    # --- ⚠️ IMPORTANT CHANGE: Floor the timestamp to the start of the minute ⚠️ ---
-    now_utc = datetime.now(timezone.utc)
-    timestamp_floor = now_utc.replace(second=0, microsecond=0)
-    timestamp_iso = timestamp_floor.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # --- ⚠️ IMPORTANT CHANGE: Compute timestamp in IST, formatted dd/mm/yyyy hh:mm:ss ⚠️ ---
+    #
+    # We want the sheet’s “timestamp” column to look like “06/06/2025 16:27:00” (IST).
+    # So:
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
+    now_ist = datetime.now(ist_tz)
+    timestamp_str = now_ist.strftime("%d/%m/%Y %H:%M:%S")
 
     # --- Step 4: Build a “new row” for each video_id with the current stats & metrics ---
     new_rows = []
@@ -371,7 +424,7 @@ def run_once_and_append():
             continue
 
         published_dt = video_to_published_past[vid]
-        published_iso = published_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        published_iso = published_dt.strftime("%Y-%m-%dT%H:%M:%SZ")  # leave published_at in UTC iso for clarity
         channel_title = video_to_channel_past.get(vid, "N/A")
 
         viewCount = stats[vid]["viewCount"]
@@ -379,7 +432,7 @@ def run_once_and_append():
         commentCount = stats[vid]["commentCount"]
 
         # Hours since published (floor at 1 second = 1/3600 hour)
-        delta_hours = max((now_utc - published_dt).total_seconds() / 3600.0, 1/3600.0)
+        delta_hours = max((datetime.now(timezone.utc) - published_dt).total_seconds() / 3600.0, 1/3600.0)
         vph = viewCount / delta_hours
         engagement_rate = ((likeCount + commentCount) / viewCount) if viewCount > 0 else 0.0
 
@@ -387,7 +440,7 @@ def run_once_and_append():
             vid,
             channel_title,
             published_iso,
-            timestamp_iso,
+            timestamp_str,      # ← our new IST, dd/mm/yyyy hh:mm:ss format
             str(viewCount),
             str(likeCount),
             str(commentCount),
@@ -445,7 +498,7 @@ st.write(
        - It reads all tracked Shorts from the Google Sheet.
        - It discovers any *new* Shorts published *today in IST* and starts tracking them.
        - It fetches the latest stats for *all* tracked Shorts (old + new), computes VPH & engagement rate, and appends a row per video with the new timestamp.
-       - **Because we floor timestamps to “HH:MM:00Z,” even if two runs happen within the same minute, only one row actually gets written.**
+       - **The timestamp is now in IST and in `dd/mm/yyyy hh:mm:ss` format.**
     2. You can also click the button below to force a “Run Now” immediately.
     3. The sheet accumulates one row per (video_id, timestamp), letting you watch metrics evolve over hours/days.
     """
