@@ -13,20 +13,20 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 def scheduler_loop():
     """
-    Runs in a daemon thread. Sleeps until the next top‐of‐hour boundary, then calls
+    Runs in a daemon thread. Sleeps until the next top-of-hour boundary, then calls
     run_once_and_append(). After each run, it waits for the next hour.
     """
     # Give the UI a moment to finish loading
     time.sleep(1)
 
     while True:
-        # 1) Sleep until the start of the next hour (minute=0, second=0)
         now = datetime.now()
+        # Compute next hour boundary (minute=0, second=0)
         next_hour = (now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
         secs_to_next_hour = (next_hour - now).total_seconds()
         time.sleep(secs_to_next_hour)
 
-        # 2) Call our “run once” logic
+        # Run the “run once” logic at the top of the hour
         run_once_and_append()
 
 _scheduler_thread = None
@@ -45,10 +45,8 @@ def start_scheduler_thread():
 
 st.set_page_config(layout="wide")
 
-# 1) YouTube Data API key stored in Streamlit secrets
 API_KEY = st.secrets["youtube"]["api_key"]
 
-# 2) Nine YouTube channel IDs to check for new Shorts
 CHANNEL_IDS = [
     "UC415bOPUcGSamy543abLmRA",
     "UCRzYN32xtBf3Yxsx5BvJWJw",
@@ -61,7 +59,6 @@ CHANNEL_IDS = [
     "UCUUlw3anBIkbW9W44Y-eURw",
 ]
 
-# 3) Your Google Sheet URL (make sure your service account is an Editor)
 GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1OdRsySMe4jcc7xxr01MJFmG94msoYEZWgEflVSj0vRs/edit"
 
 
@@ -69,10 +66,6 @@ GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1OdRsySMe4jcc7xxr01MJ
 
 @st.cache_resource(ttl=3600)
 def get_google_sheet_client():
-    """
-    Authorize via service‐account JSON stored in st.secrets.
-    Returns None + logs an error if authentication fails.
-    """
     try:
         creds_dict = st.secrets["gcp_service_account"]
         scopes = [
@@ -88,10 +81,6 @@ def get_google_sheet_client():
 
 @st.cache_resource(ttl=3600)
 def get_worksheet():
-    """
-    Open the sheet by URL, then fetch the “Sheet1” worksheet.
-    Returns None + logs if anything goes wrong.
-    """
     client = get_google_sheet_client()
     if not client:
         return None
@@ -107,26 +96,15 @@ def get_worksheet():
 # ----------------------- YouTube Helper Functions ----------------------------
 
 def create_youtube_client():
-    """
-    Build a YouTube Data API v3 client using the provided API key.
-    """
     return build("youtube", "v3", developerKey=API_KEY)
 
 def iso8601_to_seconds(duration_str: str) -> int:
-    """
-    Convert an ISO 8601 duration (e.g. "PT2M30S") into total seconds.
-    Returns 0 on parse errors.
-    """
     try:
         return int(parse_duration(duration_str).total_seconds())
     except:
         return 0
 
 def get_midnight_ist_utc() -> datetime:
-    """
-    Return a timezone-aware UTC datetime corresponding to 00:00:00 IST today.
-    IST is UTC+5:30.
-    """
     now_utc = datetime.now(timezone.utc)
     ist_tz = timezone(timedelta(hours=5, minutes=30))
     now_ist = now_utc.astimezone(ist_tz)
@@ -143,10 +121,6 @@ def get_midnight_ist_utc() -> datetime:
     return midnight_ist.astimezone(timezone.utc)
 
 def is_within_today(published_at_str: str) -> bool:
-    """
-    Given a publishedAt timestamp (RFC3339: "YYYY-MM-DDThh:mm:ssZ"),
-    return True if that moment (in UTC) falls between [00:00 IST today, 24h later).
-    """
     try:
         pub_dt = datetime.fromisoformat(published_at_str.replace("Z", "+00:00")).astimezone(timezone.utc)
     except:
@@ -156,12 +130,7 @@ def is_within_today(published_at_str: str) -> bool:
     return midnight_utc <= pub_dt < next_midnight_utc
 
 def retry_youtube_call(func_or_request, *args, **kwargs):
-    """
-    Retry pattern for YouTube API calls. If `func_or_request` is a HttpRequest object,
-    just do request.execute(). If it's a callable (like youtube.videos().list),
-    call it with (*args, **kwargs).execute(). On HttpError, wait 2s and retry once.
-    Returns the parsed JSON on success, or None on two failures.
-    """
+    # If it's a pre-built HttpRequest (has .execute()()), call execute(), retry once on error
     if hasattr(func_or_request, "execute") and not callable(func_or_request):
         request = func_or_request
         try:
@@ -175,6 +144,7 @@ def retry_youtube_call(func_or_request, *args, **kwargs):
                 st.error(f"❌ YouTube API error (second attempt): {e2}")
                 return None
     else:
+        # If it's a callable like youtube.videos().list, call it then execute
         try:
             return func_or_request(*args, **kwargs).execute()
         except HttpError as e:
@@ -202,7 +172,6 @@ def discover_shorts():
     all_short_ids = []
 
     for idx, channel_id in enumerate(CHANNEL_IDS, start=1):
-        # 1) Fetch channel snippet + contentDetails to find the uploads playlist
         ch_resp = retry_youtube_call(
             youtube.channels().list,
             part="snippet,contentDetails",
@@ -216,7 +185,6 @@ def discover_shorts():
         uploads_playlist = ch_resp["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
         logs.append(f"🔍 Checking channel {idx}/{len(CHANNEL_IDS)}: '{channel_title}'")
 
-        # 2) Page through the uploads playlist (50 items/page)
         pl_req = youtube.playlistItems().list(
             part="snippet",
             playlistId=uploads_playlist,
@@ -234,7 +202,6 @@ def discover_shorts():
                 if not is_within_today(published_at):
                     continue
 
-                # 3) For each candidate, fetch contentDetails to check duration
                 cd_resp = retry_youtube_call(
                     youtube.videos().list,
                     part="contentDetails,snippet",
@@ -298,11 +265,12 @@ def fetch_statistics(video_ids):
 
 def run_once_and_append():
     """
-    1) Read every row from the sheet → discover which video_ids we have already been tracking.
+    1) Read the entire sheet → discover which video_ids we have already been tracking.
     2) Call discover_shorts() to find any *new* Shorts published today (IST). Add them to our tracking list.
     3) Fetch the latest stats for *all* tracked Shorts (old + new).
-    4) Compute VPH & engagement_rate for each, build a new row [video_id, channel_title, published_at, timestamp, viewCount, likeCount, commentCount, vph, engagement_rate].
-    5) Filter out (video_id, timestamp) duplicates if that exact combination already exists in the sheet.
+    4) Compute VPH & engagement_rate for each, build a new row
+       [Short ID, Channel, Upload Date, Cronjob time, Views, Likes, Comment, VPH, Engagement rate, Engagement rate %].
+    5) Filter out (video_id, cronjob_time) duplicates if that exact combination already exists in the sheet.
     6) Append the remaining new rows in one batch.
     7) Display debug info in Streamlit (how many new rows, how many skipped as duplicates, etc.)
     """
@@ -322,58 +290,73 @@ def run_once_and_append():
     header = all_data[0] if all_data else []
     rows = all_data[1:] if len(all_data) > 1 else []
 
-    # 1a) Ensure the sheet has exactly 9 columns in the header. If not, initialize it.
-    if not header or len(header) < 9:
+    # If the sheet is empty OR header doesn’t match our expected 10‐column format, re‐initialize:
+    expected_header = [
+        "Short ID",
+        "Channel",
+        "Upload Date",
+        "Cronjob time",
+        "Views",
+        "Likes",
+        "Comment",
+        "VPH",
+        "Engagement rate",
+        "Engagement rate %"
+    ]
+    if not header or len(header) < 10 or header[:10] != expected_header:
         try:
             ws.clear()
-            ws.append_row([
-                "video_id",
-                "channel_title",
-                "published_at",
-                "timestamp",
-                "viewCount",
-                "likeCount",
-                "commentCount",
-                "vph",
-                "engagement_rate"
-            ], value_input_option="RAW")
-            all_data = ws.get_all_values()
-            header = all_data[0]
-            rows = all_data[1:]
+            ws.append_row(expected_header, value_input_option="RAW")
+            rows = []  # no data rows yet
             st.success("✔️ Initialized header row in the sheet.")
         except Exception as e:
             st.error(f"❌ Error initializing header row: {e}")
             return
 
-    # 1b) Build a set of all tracked video_ids and a map to their metadata from existing rows
+    # Build indexes from header
+    idxShortID      = header.index("Short ID")
+    idxChannel      = header.index("Channel")
+    idxUploadDate   = header.index("Upload Date")
+    idxCronjobTime  = header.index("Cronjob time")
+    idxViews        = header.index("Views")
+    idxLikes        = header.index("Likes")
+    idxComment      = header.index("Comment")
+    idxVPH          = header.index("VPH")
+    idxEngRate      = header.index("Engagement rate")
+    idxEngRatePct   = header.index("Engagement rate %")
+
+    # 1b) Build a set of all tracked video_ids and map their upload‐times (UTC)
     tracked_ids = set()
     video_to_channel_past = {}
     video_to_published_past = {}
 
+    # IST timezone object
     ist_tz = timezone(timedelta(hours=5, minutes=30))
 
     for r in rows:
         if len(r) < 4:
             continue
-        vid = r[0]
+        vid = r[idxShortID]
         if vid not in tracked_ids:
             tracked_ids.add(vid)
-            video_to_channel_past[vid] = r[1]
+            video_to_channel_past[vid] = r[idxChannel]
 
-            # Attempt to parse “published_at” in either ISO‐UTC or IST dd/mm/yyyy format
-            pub_str = r[2]
+            # Parse “Upload Date” which may be either:
+            #  • ISO-8601 UTC (e.g. "2025-06-06T06:30:35Z")
+            #  • IST format "dd/mm/yyyy hh:mm:ss"
+            pub_str = r[idxUploadDate]
             try:
                 if "T" in pub_str and pub_str.endswith("Z"):
-                    # ISO‐8601 UTC string → parse to UTC
+                    # ISO → parse UTC
                     dt_utc = datetime.fromisoformat(pub_str.replace("Z", "+00:00"))
                     video_to_published_past[vid] = dt_utc.astimezone(timezone.utc)
                 else:
-                    # “dd/mm/yyyy hh:mm:ss” in IST → parse → convert to UTC
+                    # IST "dd/mm/yyyy hh:mm:ss" → parse → convert to UTC
                     dt_ist = datetime.strptime(pub_str, "%d/%m/%Y %H:%M:%S")
                     dt_ist = dt_ist.replace(tzinfo=ist_tz)
                     video_to_published_past[vid] = dt_ist.astimezone(timezone.utc)
-                # If it fails, we simply do not add to video_to_published_past and skip later
             except Exception:
+                # If parsing fails, skip storing published_at for that vid
                 pass
 
     st.write(f"➡️  Currently tracking {len(tracked_ids)} unique Short(s) from previous runs.")
@@ -408,11 +391,18 @@ def run_once_and_append():
         st.error("❌ Failed to fetch statistics for any tracked video.")
         return
 
-    # --- Step 4: Build a “new row” for each video_id with the current stats & metrics ---
+    # Determine which (video_id, cronjob_time) pairs already exist:
+    existing_pairs = set()
+    for r in rows:
+        if len(r) >= 4:
+            vid = r[idxShortID]
+            cron_str = r[idxCronjobTime]
+            existing_pairs.add((vid, cron_str))
+
+    # --- Step 4: Build new rows for each tracked Short ---
     new_rows = []
-    # Compute “now” in IST, dd/mm/yyyy hh:mm:ss
     now_ist = datetime.now(timezone.utc).astimezone(ist_tz)
-    timestamp_str = now_ist.strftime("%d/%m/%Y %H:%M:%S")
+    cron_str = now_ist.strftime("%d/%m/%Y %H:%M:%S")  # “Cronjob time” in IST
 
     for vid in all_ids:
         if vid not in stats:
@@ -422,62 +412,46 @@ def run_once_and_append():
             st.warning(f"⚠️ Skipping {vid} (missing published_at info).")
             continue
 
-        # Convert stored UTC → IST for “published_at” column
+        # Convert stored UTC → IST for “Upload Date”
         published_dt_utc = video_to_published_past[vid]
         published_dt_ist = published_dt_utc.astimezone(ist_tz)
-        published_str = published_dt_ist.strftime("%d/%m/%Y %H:%M:%S")
+        upload_str = published_dt_ist.strftime("%d/%m/%Y %H:%M:%S")
 
         channel_title = video_to_channel_past.get(vid, "N/A")
         viewCount = stats[vid]["viewCount"]
         likeCount = stats[vid]["likeCount"]
         commentCount = stats[vid]["commentCount"]
 
-        # Hours since published (floor at 1 second = 1/3600 hour)
         delta_hours = max((datetime.now(timezone.utc) - published_dt_utc).total_seconds() / 3600.0, 1/3600.0)
         vph = viewCount / delta_hours
-        engagement_rate = ((likeCount + commentCount) / viewCount) if viewCount > 0 else 0.0
+        eng_rate = ((likeCount + commentCount) / viewCount) if viewCount > 0 else 0.0
+        eng_rate_pct = eng_rate * 100.0
 
-        row = [
-            vid,
-            channel_title,
-            published_str,    # “dd/mm/yyyy hh:mm:ss” in IST for upload time
-            timestamp_str,    # “dd/mm/yyyy hh:mm:ss” in IST for cronjob time
-            str(viewCount),
-            str(likeCount),
-            str(commentCount),
-            f"{vph:.2f}",
-            f"{engagement_rate:.4f}"
-        ]
-        new_rows.append(row)
+        # If this (vid, cron_str) wasn’t already in the sheet, append it
+        if (vid, cron_str) not in existing_pairs:
+            new_rows.append([
+                vid,
+                channel_title,
+                upload_str,       # Upload Date (IST dd/mm/yyyy hh:mm:ss)
+                cron_str,         # Cronjob time (IST dd/mm/yyyy hh:mm:ss)
+                str(viewCount),
+                str(likeCount),
+                str(commentCount),
+                f"{vph:.2f}",
+                f"{eng_rate:.4f}",
+                f"{eng_rate_pct:.2f}"
+            ])
 
-    st.write(f"➡️ Built {len(new_rows)} new stat‐rows (one per tracked video).")
+    st.write(f"➡️ {len(new_rows)} new row(s) to append (out of {len(all_ids)} total Shorts).")
 
-    # --- Step 5: Filter out any (video_id, timestamp) duplicates that are already in the sheet ---
-    existing_pairs = set()
-    for r in rows:
-        if len(r) >= 4:
-            existing_pairs.add((r[0], r[3]))  # (video_id, timestamp)
-
-    filtered_rows = []
-    skipped_count = 0
-    for r in new_rows:
-        key = (r[0], r[3])
-        if key in existing_pairs:
-            skipped_count += 1
-            st.info(f"Skipping duplicate for {r[0]} @ {r[3]}")
-        else:
-            filtered_rows.append(r)
-
-    st.write(f"➡️ {len(filtered_rows)} row(s) left after filtering duplicates (skipped {skipped_count}).")
-
-    if not filtered_rows:
+    if not new_rows:
         st.info("ℹ️ No new rows to append (all duplicates).")
         return
 
-    # --- Step 6: Append the filtered rows to the sheet in one batch ---
+    # --- Step 5: Append the filtered rows in one batch ---
     try:
-        ws.append_rows(filtered_rows, value_input_option="RAW")
-        st.success(f"✅ Appended {len(filtered_rows)} row(s) to the sheet successfully.")
+        ws.append_rows(new_rows, value_input_option="RAW")
+        st.success(f"✅ Appended {len(new_rows)} row(s) to the sheet successfully.")
     except Exception as e:
         st.error(f"❌ Error appending rows to sheet: {e}")
         return
@@ -496,12 +470,13 @@ st.write(
     """
     **How this works**:
     1. A background scheduler runs **at the top of every hour** and calls our “Run Once” logic:
-       - It reads all tracked Shorts from the Google Sheet.
+       - It reads all tracked Shorts from the Google Sheet (column “Short ID”).
        - It discovers any *new* Shorts published *today in IST* and starts tracking them.
        - It fetches the latest stats for *all* tracked Shorts (old + new), computes VPH & engagement rate, and appends a row per video with the new timestamp.
-       - **Both “Upload Date” and “Cronjob time” are now in IST and in `dd/mm/yyyy hh:mm:ss` format.**
+       - **Both “Upload Date” and “Cronjob time” are in IST `dd/mm/yyyy hh:mm:ss` format.**  
+         Engagement rate is written as a decimal and as a percentage.
     2. You can also click the button below to force a “Run Now” immediately.
-    3. The sheet accumulates one row per (video_id, timestamp), letting you watch metrics evolve over hours/days.
+    3. The sheet accumulates one row per (Short ID, Cronjob time), letting you watch metrics evolve hour by hour.
     """
 )
 
