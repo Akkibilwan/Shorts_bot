@@ -26,7 +26,7 @@ CHANNEL_IDS = [
     "UCUUlw3anBIkbW9W44Y-eURw",
 ]
 
-GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1OdRsySMe4jcc7xxr01MJFmG94msoYEZWgEflVSj0vRs/edit?gid=0#gid=0"
+GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1OdRsySMe4jcc7xxr01MJFmG94msoYEZWgEflVSj0vRs/edit"
 
 
 # ----------------------- Google Sheets Setup ---------------------------
@@ -232,33 +232,102 @@ def fetch_statistics(video_ids):
 # ----------------------- Core “Run Now” Function ----------------------------
 
 def run_once_and_append():
+    st.info("🔍 Reading existing sheet and discovering new Shorts…")
+    ws = get_worksheet()
+    if ws is None:
+        st.error("Cannot connect to Google Sheet. Aborting.")
+        return
+
+    # 1) Read entire sheet
+    try:
+        all_data = ws.get_all_values()
+    except Exception as e:
+        st.error(f"Error reading sheet: {e}")
+        return
+
+    header = all_data[0] if all_data else []
+    rows = all_data[1:] if len(all_data) > 1 else []
+
+    # Ensure header has nine columns; if sheet is empty, set header
+    if not header or len(header) < 9:
+        try:
+            ws.clear()
+            ws.append_row([
+                "video_id",
+                "channel_title",
+                "published_at",
+                "timestamp",
+                "viewCount",
+                "likeCount",
+                "commentCount",
+                "vph",
+                "engagement_rate"
+            ], value_input_option="RAW")
+            all_data = ws.get_all_values()
+            header = all_data[0]
+            rows = all_data[1:]
+        except Exception as e:
+            st.error(f"Error initializing header row: {e}")
+            return
+
+    # 2) Build maps from existing rows: track each video_id -> (channel_title, published_at)
+    tracked_ids = set()
+    video_to_channel_past = {}
+    video_to_published_past = {}
+    for r in rows:
+        if len(r) < 4:
+            continue
+        vid = r[0]
+        if vid not in tracked_ids:
+            tracked_ids.add(vid)
+            video_to_channel_past[vid] = r[1]
+            try:
+                video_to_published_past[vid] = datetime.fromisoformat(r[2].replace("Z", "+00:00")).astimezone(timezone.utc)
+            except:
+                # If parsing fails, skip
+                pass
+
+    # 3) Discover any new Shorts uploaded today in IST
     st.info("🔍 Discovering Shorts published today in IST…")
-    video_to_channel, video_to_published, logs, no_shorts_flag = discover_shorts()
-    for line in logs:
+    video_to_channel_new, video_to_published_new, discover_logs, no_shorts_flag = discover_shorts()
+    for line in discover_logs:
         st.write(line)
 
     if no_shorts_flag:
-        st.warning("No Shorts found (or an error occurred). Aborting.")
-        return
+        st.warning("No Shorts published today in IST (or an error occurred). Proceeding to poll existing IDs only.")
+    else:
+        # Add newly discovered IDs to our maps
+        for vid, ch in video_to_channel_new.items():
+            if vid not in tracked_ids:
+                tracked_ids.add(vid)
+                video_to_channel_past[vid] = ch
+                video_to_published_past[vid] = video_to_published_new[vid]
+        st.success(f"ℹ️ Total tracked Shorts: {len(tracked_ids)}")
 
-    st.success(f"🕒 Discovered {len(video_to_channel)} Shorts. Fetching stats…")
-    video_ids = list(video_to_channel.keys())
-    stats = fetch_statistics(video_ids)
+    # 4) Fetch current stats for all tracked IDs
+    st.info(f"🕒 Fetching stats for {len(tracked_ids)} tracked Shorts…")
+    all_ids = list(tracked_ids)
+    stats = fetch_statistics(all_ids)
     if not stats:
-        st.error("Failed to fetch statistics for discovered videos.")
+        st.error("Failed to fetch statistics for any tracked videos.")
         return
 
     now_utc = datetime.now(timezone.utc)
     timestamp_iso = now_utc.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    rows_to_append = []
-    for vid in video_ids:
+    # 5) Build new rows for each tracked video
+    new_rows = []
+    for vid in all_ids:
         if vid not in stats:
             st.warning(f"Skipping {vid} (no stats returned).")
             continue
-
-        published_dt = video_to_published[vid]
+        if vid not in video_to_published_past:
+            st.warning(f"Skipping {vid} (missing published_at).")
+            continue
+        published_dt = video_to_published_past[vid]
         published_iso = published_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        channel_title = video_to_channel_past.get(vid, "N/A")
+
         viewCount = stats[vid]["viewCount"]
         likeCount = stats[vid]["likeCount"]
         commentCount = stats[vid]["commentCount"]
@@ -269,7 +338,7 @@ def run_once_and_append():
 
         row = [
             vid,
-            video_to_channel[vid],
+            channel_title,
             published_iso,
             timestamp_iso,
             str(viewCount),
@@ -278,43 +347,34 @@ def run_once_and_append():
             f"{vph:.2f}",
             f"{engagement_rate:.4f}"
         ]
-        rows_to_append.append(row)
+        new_rows.append(row)
 
-    if not rows_to_append:
-        st.warning("No new rows to append.")
+    if not new_rows:
+        st.info("No new stat rows to append.")
         return
 
-    ws = get_worksheet()
-    if ws is None:
-        st.error("Cannot connect to Google Sheet. Aborting.")
-        return
+    # 6) Filter out duplicates by checking (video_id, timestamp) in existing rows
+    existing_pairs = set()
+    for r in rows:
+        if len(r) >= 4:
+            existing_pairs.add((r[0], r[3]))
 
-    try:
-        existing_data = ws.get("A2:D")
-        existing_pairs = set()
-        if existing_data:
-            for r in existing_data:
-                if len(r) >= 4:
-                    existing_pairs.add((r[0], r[3]))
-    except Exception as e:
-        st.error(f"Error reading existing rows: {e}")
-        existing_pairs = set()
-
-    filtered = []
-    for r in rows_to_append:
+    filtered_rows = []
+    for r in new_rows:
         key = (r[0], r[3])
         if key in existing_pairs:
             st.info(f"Skipping duplicate for {r[0]} @ {r[3]}")
         else:
-            filtered.append(r)
+            filtered_rows.append(r)
 
-    if not filtered:
-        st.info("All rows already exist in the sheet.")
+    if not filtered_rows:
+        st.info("All new stats already exist in the sheet.")
         return
 
+    # 7) Append filtered rows in one batch
     try:
-        ws.append_rows(filtered, value_input_option="RAW")
-        st.success(f"✅ Appended {len(filtered)} new row(s) to the sheet.")
+        ws.append_rows(filtered_rows, value_input_option="RAW")
+        st.success(f"✅ Appended {len(filtered_rows)} new row(s) to the sheet.")
     except Exception as e:
         st.error(f"Error appending to sheet: {e}")
 
@@ -325,9 +385,11 @@ st.title("📊 YouTube Shorts VPH & Engagement Tracker")
 
 st.write(
     """
-    This app discovers all YouTube Shorts (≤ 180 s) uploaded *today in IST*
-    across nine predefined channels, fetches their stats, computes VPH and engagement,
-    and appends a row per video to the Google Sheet.
+    This app will:
+    1. Read all tracked Short IDs from the Google Sheet.
+    2. Discover any new Shorts uploaded *today in IST* across the nine channels and add them to tracking.
+    3. Fetch current stats (viewCount, likeCount, commentCount) for every tracked Short (including older ones).
+    4. Compute VPH and engagement rate, then append a new row (per video) with the current timestamp into the sheet.
     """
 )
 
