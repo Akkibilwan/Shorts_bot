@@ -8,6 +8,21 @@ from isodate import parse_duration
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
+
+
+def scheduler_loop():
+    while True:
+        log_timestamp_job()
+        time.sleep(60)
+
+_scheduler_thread = None
+
+def start_cron_thread():
+    global _scheduler_thread
+    if _scheduler_thread is None:
+        _scheduler_thread = threading.Thread(target=scheduler_loop, daemon=True)
+        _scheduler_thread.start()
+
 # --------------------------- Configuration ---------------------------
 
 st.set_page_config(layout="wide")
@@ -266,6 +281,9 @@ def fetch_statistics(video_ids):
 # ----------------------- Core “Run Now” Function ----------------------------
 
 def run_once_and_append():
+    # Kick off the cron thread (only once)
+    start_cron_thread()
+    
     """
     1) Read every row from the sheet → discover which video_ids we have already been tracking.
     2) Call discover_shorts() to find any *new* Shorts published today (IST). Add them to our tracking list.
