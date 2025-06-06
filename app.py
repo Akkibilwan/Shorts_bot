@@ -15,35 +15,33 @@ def scheduler_loop():
     """
     Runs in a daemon thread. Sleeps until the next 60-second boundary, then calls
     run_once_and_append(). After each run, repeats. To switch to an hourly schedule,
-    change the sleep logic to wait until the next hour boundary (see commented code below).
+    change the sleep logic to wait until the next hour boundary (commented below).
     """
-    # Initial small delay so that the Streamlit app can finish its first render.
+    # Give the UI a moment to finish loading
     time.sleep(1)
 
     while True:
-        # 1) Compute seconds until the next minute boundary (e.g. xx:00 seconds).
+        # Wait until the top of the next minute
         now = datetime.now()
         secs_to_next_minute = 60 - now.second
         time.sleep(secs_to_next_minute)
 
-        # 2) Call the main “run once” function
         run_once_and_append()
 
-        # If you want to change to hourly scheduling instead of per-minute:
-        #    now = datetime.now()
-        #    # Sleep until the top of the next hour
-        #    next_hour = (now.replace(minute=0, second=0, microsecond=0) 
-        #                 + timedelta(hours=1))
-        #    secs_to_next_hour = (next_hour - now).total_seconds()
-        #    time.sleep(secs_to_next_hour)
-
+        # If you want hourly scheduling instead, comment out the above 3 lines
+        # and uncomment this block:
+        #
+        # now = datetime.now()
+        # next_hour = (now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
+        # secs_to_next_hour = (next_hour - now).total_seconds()
+        # time.sleep(secs_to_next_hour)
+        #
 
 _scheduler_thread = None
 
 def start_scheduler_thread():
     """
     Launch the scheduler_loop() in a background daemon thread exactly once.
-    We store a flag in st.session_state so that reruns do not start multiple threads.
     """
     global _scheduler_thread
     if _scheduler_thread is None:
@@ -71,7 +69,7 @@ CHANNEL_IDS = [
     "UCUUlw3anBIkbW9W44Y-eURw",
 ]
 
-# 3) Your Google Sheet URL (make sure your service account is shared as Editor)
+# 3) Your Google Sheet URL (make sure your service account is an Editor)
 GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1OdRsySMe4jcc7xxr01MJFmG94msoYEZWgEflVSj0vRs/edit"
 
 
@@ -80,7 +78,7 @@ GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1OdRsySMe4jcc7xxr01MJ
 @st.cache_resource(ttl=3600)
 def get_google_sheet_client():
     """
-    Create a gspread client using the service account credentials stored in st.secrets.
+    Authorize via service‐account JSON stored in st.secrets.
     Returns None + logs an error if authentication fails.
     """
     try:
@@ -99,7 +97,7 @@ def get_google_sheet_client():
 @st.cache_resource(ttl=3600)
 def get_worksheet():
     """
-    Open the sheet by URL, then fetch the ‘Sheet1’ worksheet.
+    Open the sheet by URL, then fetch the “Sheet1” worksheet.
     Returns None + logs if anything goes wrong.
     """
     client = get_google_sheet_client()
@@ -408,8 +406,10 @@ def run_once_and_append():
         st.error("❌ Failed to fetch statistics for any tracked video.")
         return
 
+    # --- IMPORTANT: Floor the timestamp to the start of the minute ---
     now_utc = datetime.now(timezone.utc)
-    timestamp_iso = now_utc.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp_floor = now_utc.replace(second=0, microsecond=0)
+    timestamp_iso = timestamp_floor.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # --- Step 4: Build a “new row” for each video_id with the current stats & metrics ---
     new_rows = []
