@@ -9,20 +9,47 @@ from isodate import parse_duration
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-
+# --------------------------- Scheduler Thread Logic ---------------------------
 
 def scheduler_loop():
+    """
+    Runs in a daemon thread. Sleeps until the next 60-second boundary, then calls
+    run_once_and_append(). After each run, repeats. To switch to an hourly schedule,
+    change the sleep logic to wait until the next hour boundary (see commented code below).
+    """
+    # Initial small delay so that the Streamlit app can finish its first render.
+    time.sleep(1)
+
     while True:
+        # 1) Compute seconds until the next minute boundary (e.g. xx:00 seconds).
+        now = datetime.now()
+        secs_to_next_minute = 60 - now.second
+        time.sleep(secs_to_next_minute)
+
+        # 2) Call the main “run once” function
         run_once_and_append()
-        time.sleep(30)
 
-# _scheduler_thread = None
+        # If you want to change to hourly scheduling instead of per-minute:
+        #    now = datetime.now()
+        #    # Sleep until the top of the next hour
+        #    next_hour = (now.replace(minute=0, second=0, microsecond=0) 
+        #                 + timedelta(hours=1))
+        #    secs_to_next_hour = (next_hour - now).total_seconds()
+        #    time.sleep(secs_to_next_hour)
 
-# def start_cron_thread():
-#     global _scheduler_thread
-#     if _scheduler_thread is None:
-#         _scheduler_thread = threading.Thread(target=scheduler_loop, daemon=True)
-#         _scheduler_thread.start()
+
+_scheduler_thread = None
+
+def start_scheduler_thread():
+    """
+    Launch the scheduler_loop() in a background daemon thread exactly once.
+    We store a flag in st.session_state so that reruns do not start multiple threads.
+    """
+    global _scheduler_thread
+    if _scheduler_thread is None:
+        _scheduler_thread = threading.Thread(target=scheduler_loop, daemon=True)
+        _scheduler_thread.start()
+
 
 # --------------------------- Configuration ---------------------------
 
@@ -282,7 +309,6 @@ def fetch_statistics(video_ids):
 # ----------------------- Core “Run Now” Function ----------------------------
 
 def run_once_and_append():
-    
     """
     1) Read every row from the sheet → discover which video_ids we have already been tracking.
     2) Call discover_shorts() to find any *new* Shorts published today (IST). Add them to our tracking list.
@@ -359,12 +385,14 @@ def run_once_and_append():
 
     if not no_shorts_flag:
         # Add any brand-new video IDs to our tracking set & maps
+        added_count = 0
         for vid, ch in video_to_channel_new.items():
             if vid not in tracked_ids:
                 tracked_ids.add(vid)
                 video_to_channel_past[vid] = ch
                 video_to_published_past[vid] = video_to_published_new[vid]
-        st.success(f"ℹ️ Now tracking {len(tracked_ids)} Shorts in total (added {len(video_to_channel_new)} today).")
+                added_count += 1
+        st.success(f"ℹ️ Now tracking {len(tracked_ids)} Shorts in total (added {added_count} today).")
     else:
         st.warning("ℹ️ No new Shorts found today (IST). Will poll stats for existing IDs only.")
 
@@ -454,22 +482,24 @@ def run_once_and_append():
 
 # ----------------------- Streamlit Layout ----------------------------
 
+# Start the background scheduler thread exactly once
+if "scheduler_started" not in st.session_state:
+    start_scheduler_thread()
+    st.session_state.scheduler_started = True
+
 st.title("📊 YouTube Shorts VPH & Engagement Tracker")
 
 st.write(
     """
     **How this works**:
-    1. Every time you click “Run Now,” we read all previously‐tracked Shorts from the sheet.
-    2. We check if any *new* Shorts were published *today in IST* across the nine channels—if so, we add them to tracking.
-    3. We fetch the current stats (views/likes/comments) for *all* tracked Shorts (old + new).
-    4. We compute **VPH** and **engagement rate** for each, and append a new row per video with a fresh timestamp.
-    5. Over time (hour by hour), the sheet accumulates one row per (video_id, timestamp), letting you see how each Short’s metrics evolve.
+    1. A background scheduler runs every 60 seconds (on the minute) and calls our “Run Once” logic.
+       - It reads all tracked Shorts from the Google Sheet.
+       - It discovers any *new* Shorts published *today in IST* and starts tracking them.
+       - It fetches the latest stats for *all* tracked Shorts (old + new), computes VPH & engagement rate, and appends a row per video with the new timestamp.
+    2. You can also click the button below to force a “Run Now” immediately.
+    3. The sheet accumulates one row per (video_id, timestamp), letting you watch metrics evolve over hours/days.
     """
 )
-
-# Kick off the cron thread (only once)
-# start_cron_thread()
-scheduler_loop()
 
 if st.button("▶️ Run Now: Discover & Append to Sheet"):
     run_once_and_append()
