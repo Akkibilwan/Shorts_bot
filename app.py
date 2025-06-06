@@ -13,29 +13,21 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 def scheduler_loop():
     """
-    Runs in a daemon thread. Sleeps until the next 60-second boundary, then calls
-    run_once_and_append(). After each run, repeats.
+    Runs in a daemon thread. Sleeps until the next top-of-hour boundary, then calls
+    run_once_and_append(). After each run, it waits for the next hour.
     """
     # Give the UI a moment to finish loading
     time.sleep(1)
 
     while True:
-        # 1) Sleep until the top of the next minute
+        # 1) Sleep until the start of the next hour (minute=0, second=0)
         now = datetime.now()
-        secs_to_next_minute = 60 - now.second
-        time.sleep(secs_to_next_minute)
+        next_hour = (now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
+        secs_to_next_hour = (next_hour - now).total_seconds()
+        time.sleep(secs_to_next_hour)
 
         # 2) Call our “run once” logic
         run_once_and_append()
-
-        # If you later want an hourly schedule instead of per-minute, comment out
-        # the above three lines and uncomment the block below:
-        #
-        # now = datetime.now()
-        # next_hour = (now.replace(minute=0, second=0, microsecond=0) 
-        #              + timedelta(hours=1))
-        # secs_to_next_hour = (next_hour - now).total_seconds()
-        # time.sleep(secs_to_next_hour)
 
 _scheduler_thread = None
 
@@ -424,7 +416,7 @@ def run_once_and_append():
             continue
 
         published_dt = video_to_published_past[vid]
-        published_iso = published_dt.strftime("%Y-%m-%dT%H:%M:%SZ")  # leave published_at in UTC iso for clarity
+        published_iso = published_dt.strftime("%Y-%m-%dT%H:%M:%SZ")  # published_at remains in UTC ISO for clarity
         channel_title = video_to_channel_past.get(vid, "N/A")
 
         viewCount = stats[vid]["viewCount"]
@@ -440,7 +432,7 @@ def run_once_and_append():
             vid,
             channel_title,
             published_iso,
-            timestamp_str,      # ← our new IST, dd/mm/yyyy hh:mm:ss format
+            timestamp_str,      # ← IST timestamp in dd/mm/yyyy hh:mm:ss
             str(viewCount),
             str(likeCount),
             str(commentCount),
@@ -494,7 +486,7 @@ st.title("📊 YouTube Shorts VPH & Engagement Tracker")
 st.write(
     """
     **How this works**:
-    1. A background scheduler runs every 60 seconds (on the minute) and calls our “Run Once” logic.
+    1. A background scheduler runs **at the top of every hour** and calls our “Run Once” logic:
        - It reads all tracked Shorts from the Google Sheet.
        - It discovers any *new* Shorts published *today in IST* and starts tracking them.
        - It fetches the latest stats for *all* tracked Shorts (old + new), computes VPH & engagement rate, and appends a row per video with the new timestamp.
