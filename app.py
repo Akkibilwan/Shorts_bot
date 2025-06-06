@@ -15,15 +15,15 @@ def scheduler_loop():
     while True:
         st.info("🔍 Reading the entire sheet to find tracked video IDs…")
         run_once_and_append()
-        time.sleep(3600)
+        time.sleep(30)
 
-_scheduler_thread = None
+# _scheduler_thread = None
 
-def start_cron_thread():
-    global _scheduler_thread
-    if _scheduler_thread is None:
-        _scheduler_thread = threading.Thread(target=scheduler_loop, daemon=True)
-        _scheduler_thread.start()
+# def start_cron_thread():
+#     global _scheduler_thread
+#     if _scheduler_thread is None:
+#         _scheduler_thread = threading.Thread(target=scheduler_loop, daemon=True)
+#         _scheduler_thread.start()
 
 # --------------------------- Configuration ---------------------------
 
@@ -469,7 +469,8 @@ st.write(
 )
 
 # Kick off the cron thread (only once)
-start_cron_thread()
+# start_cron_thread()
+scheduler_loop()
 
 if st.button("▶️ Run Now: Discover & Append to Sheet"):
     run_once_and_append()
