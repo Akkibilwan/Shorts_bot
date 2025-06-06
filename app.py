@@ -14,10 +14,9 @@ from oauth2client.service_account import ServiceAccountCredentials
 def scheduler_loop():
     """
     Runs in a daemon thread. Sleeps until the next top-of-hour boundary, then calls
-    run_once_and_append(). After each run, it waits for the next hour.
+    run_once_and_append(). After each run, waits for the next hour.
     """
-    # Give the UI a moment to finish loading
-    time.sleep(1)
+    time.sleep(1)  # Give the UI a moment to load
 
     while True:
         now = datetime.now()
@@ -26,7 +25,6 @@ def scheduler_loop():
         secs_to_next_hour = (next_hour - now).total_seconds()
         time.sleep(secs_to_next_hour)
 
-        # Run the “run once” logic at the top of the hour
         run_once_and_append()
 
 _scheduler_thread = None
@@ -44,7 +42,6 @@ def start_scheduler_thread():
 # --------------------------- Configuration ---------------------------
 
 st.set_page_config(layout="wide")
-
 API_KEY = st.secrets["youtube"]["api_key"]
 
 CHANNEL_IDS = [
@@ -61,11 +58,29 @@ CHANNEL_IDS = [
 
 GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1OdRsySMe4jcc7xxr01MJFmG94msoYEZWgEflVSj0vRs/edit"
 
+# Our exact expected header row:
+EXPECTED_HEADER = [
+    "Short ID",
+    "Channel",
+    "Upload Date",
+    "Cronjob time",
+    "Views",
+    "Likes",
+    "Comment",
+    "VPH",
+    "Engagement rate",
+    "Engagement rate %"
+]
+
 
 # ----------------------- Google Sheets Helpers ---------------------------
 
 @st.cache_resource(ttl=3600)
 def get_google_sheet_client():
+    """
+    Authorize via service-account JSON stored in st.secrets.
+    Returns None + logs an error if authentication fails.
+    """
     try:
         creds_dict = st.secrets["gcp_service_account"]
         scopes = [
@@ -81,6 +96,10 @@ def get_google_sheet_client():
 
 @st.cache_resource(ttl=3600)
 def get_worksheet():
+    """
+    Open the Google Sheet by URL, then fetch the “Sheet1” worksheet.
+    Returns None + logs if anything goes wrong.
+    """
     client = get_google_sheet_client()
     if not client:
         return None
@@ -96,15 +115,26 @@ def get_worksheet():
 # ----------------------- YouTube Helper Functions ----------------------------
 
 def create_youtube_client():
+    """
+    Build a YouTube Data API v3 client using the provided API key.
+    """
     return build("youtube", "v3", developerKey=API_KEY)
 
 def iso8601_to_seconds(duration_str: str) -> int:
+    """
+    Convert an ISO 8601 duration (e.g. "PT2M30S") into total seconds.
+    Returns 0 on parse errors.
+    """
     try:
         return int(parse_duration(duration_str).total_seconds())
     except:
         return 0
 
 def get_midnight_ist_utc() -> datetime:
+    """
+    Return a timezone-aware UTC datetime corresponding to 00:00:00 IST today.
+    IST is UTC+5:30.
+    """
     now_utc = datetime.now(timezone.utc)
     ist_tz = timezone(timedelta(hours=5, minutes=30))
     now_ist = now_utc.astimezone(ist_tz)
@@ -121,6 +151,10 @@ def get_midnight_ist_utc() -> datetime:
     return midnight_ist.astimezone(timezone.utc)
 
 def is_within_today(published_at_str: str) -> bool:
+    """
+    Given a publishedAt timestamp (RFC3339: "YYYY-MM-DDThh:mm:ssZ"),
+    return True if that moment (in UTC) falls between [00:00 IST today, 24h later).
+    """
     try:
         pub_dt = datetime.fromisoformat(published_at_str.replace("Z", "+00:00")).astimezone(timezone.utc)
     except:
@@ -130,7 +164,13 @@ def is_within_today(published_at_str: str) -> bool:
     return midnight_utc <= pub_dt < next_midnight_utc
 
 def retry_youtube_call(func_or_request, *args, **kwargs):
-    # If it's a pre-built HttpRequest (has .execute()()), call execute(), retry once on error
+    """
+    Retry pattern for YouTube API calls. If `func_or_request` is a HttpRequest object,
+    call request.execute(). If it's a callable (like youtube.videos().list), call it
+    with (*args, **kwargs).execute(). On HttpError, wait 2s and retry once. Returns
+    parsed JSON on success, or None on two failures.
+    """
+    # If it's a pre-built HttpRequest (has .execute(), but is not callable), call execute()
     if hasattr(func_or_request, "execute") and not callable(func_or_request):
         request = func_or_request
         try:
@@ -144,7 +184,7 @@ def retry_youtube_call(func_or_request, *args, **kwargs):
                 st.error(f"❌ YouTube API error (second attempt): {e2}")
                 return None
     else:
-        # If it's a callable like youtube.videos().list, call it then execute
+        # If it's a callable (like youtube.videos().list), call it then .execute()
         try:
             return func_or_request(*args, **kwargs).execute()
         except HttpError as e:
@@ -266,7 +306,7 @@ def fetch_statistics(video_ids):
 def run_once_and_append():
     """
     1) Read the entire sheet → discover which video_ids we have already been tracking.
-    2) Call discover_shorts() to find any *new* Shorts published today (IST). Add them to our tracking list.
+    2) Call discover_shorts() to find any *new* Shorts published today in IST. Add them to our tracking list.
     3) Fetch the latest stats for *all* tracked Shorts (old + new).
     4) Compute VPH & engagement_rate for each, build a new row
        [Short ID, Channel, Upload Date, Cronjob time, Views, Likes, Comment, VPH, Engagement rate, Engagement rate %].
@@ -290,40 +330,30 @@ def run_once_and_append():
     header = all_data[0] if all_data else []
     rows = all_data[1:] if len(all_data) > 1 else []
 
-    # If the sheet is empty OR header doesn’t match our expected 10‐column format, re‐initialize:
-    expected_header = [
-        "Short ID",
-        "Channel",
-        "Upload Date",
-        "Cronjob time",
-        "Views",
-        "Likes",
-        "Comment",
-        "VPH",
-        "Engagement rate",
-        "Engagement rate %"
-    ]
-    if not header or len(header) < 10 or header[:10] != expected_header:
+    # If the sheet is empty OR header doesn’t exactly match EXPECTED_HEADER, re-initialize it:
+    if header != EXPECTED_HEADER:
         try:
             ws.clear()
-            ws.append_row(expected_header, value_input_option="RAW")
+            ws.append_row(EXPECTED_HEADER, value_input_option="RAW")
+            all_data = ws.get_all_values()
+            header = all_data[0]
             rows = []  # no data rows yet
             st.success("✔️ Initialized header row in the sheet.")
         except Exception as e:
             st.error(f"❌ Error initializing header row: {e}")
             return
 
-    # Build indexes from header
-    idxShortID      = header.index("Short ID")
-    idxChannel      = header.index("Channel")
-    idxUploadDate   = header.index("Upload Date")
-    idxCronjobTime  = header.index("Cronjob time")
-    idxViews        = header.index("Views")
-    idxLikes        = header.index("Likes")
-    idxComment      = header.index("Comment")
-    idxVPH          = header.index("VPH")
-    idxEngRate      = header.index("Engagement rate")
-    idxEngRatePct   = header.index("Engagement rate %")
+    # Build indexes from the header row
+    idxShortID     = header.index("Short ID")
+    idxChannel     = header.index("Channel")
+    idxUploadDate  = header.index("Upload Date")
+    idxCronjobTime = header.index("Cronjob time")
+    idxViews       = header.index("Views")
+    idxLikes       = header.index("Likes")
+    idxComment     = header.index("Comment")
+    idxVPH         = header.index("VPH")
+    idxEngRate     = header.index("Engagement rate")
+    idxEngRatePct  = header.index("Engagement rate %")
 
     # 1b) Build a set of all tracked video_ids and map their upload‐times (UTC)
     tracked_ids = set()
@@ -391,7 +421,7 @@ def run_once_and_append():
         st.error("❌ Failed to fetch statistics for any tracked video.")
         return
 
-    # Determine which (video_id, cronjob_time) pairs already exist:
+    # Collect all existing (video_id, cronjob_time) pairs so we skip duplicates
     existing_pairs = set()
     for r in rows:
         if len(r) >= 4:
@@ -427,13 +457,13 @@ def run_once_and_append():
         eng_rate = ((likeCount + commentCount) / viewCount) if viewCount > 0 else 0.0
         eng_rate_pct = eng_rate * 100.0
 
-        # If this (vid, cron_str) wasn’t already in the sheet, append it
+        # Only append if (vid, cron_str) is not already in the sheet
         if (vid, cron_str) not in existing_pairs:
             new_rows.append([
                 vid,
                 channel_title,
-                upload_str,       # Upload Date (IST dd/mm/yyyy hh:mm:ss)
-                cron_str,         # Cronjob time (IST dd/mm/yyyy hh:mm:ss)
+                upload_str,    # "dd/mm/yyyy hh:mm:ss" IST for Upload Date
+                cron_str,      # "dd/mm/yyyy hh:mm:ss" IST for Cronjob time
                 str(viewCount),
                 str(likeCount),
                 str(commentCount),
@@ -448,7 +478,7 @@ def run_once_and_append():
         st.info("ℹ️ No new rows to append (all duplicates).")
         return
 
-    # --- Step 5: Append the filtered rows in one batch ---
+    # --- Step 5: Append the new rows in one batch ---
     try:
         ws.append_rows(new_rows, value_input_option="RAW")
         st.success(f"✅ Appended {len(new_rows)} row(s) to the sheet successfully.")
