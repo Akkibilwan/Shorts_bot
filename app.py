@@ -45,7 +45,7 @@ st.set_page_config(layout="wide")
 API_KEY = st.secrets["youtube"]["api_key"]
 
 CHANNEL_IDS = [
-    "UC415bOPUcGSamy543abLmRA",
+    "UCrgxgGQJWp_a2iWGaSJLzRA",
     "UCRzYN32xtBf3Yxsx5BvJWJw",
     "UCVOTBwF0vnSxMRIbfSE_K_g",
     "UCPk2s5c4R_d-EUUNvFFODoA",
