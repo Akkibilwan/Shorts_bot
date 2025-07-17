@@ -46,14 +46,6 @@ API_KEY = st.secrets["youtube"]["api_key"]
 
 CHANNEL_IDS = [
     "UCrgxgGQJWp_a2iWGaSJLzRA",
-    "UCRzYN32xtBf3Yxsx5BvJWJw",
-    "UCVOTBwF0vnSxMRIbfSE_K_g",
-    "UCPk2s5c4R_d-EUUNvFFODoA",
-    "UCwAdQUuPT6laN-AQR17fe1g",
-    "UCA295QVkf9O1RQ8_-s3FVXg",
-    "UCkw1tYo7k8t-Y99bOXuZwhg",
-    "UCxgAuX3XZROujMmGphN_scA",
-    "UCUUlw3anBIkbW9W44Y-eURw",
 ]
 
 GOOGLE_SHEET_URL = (
